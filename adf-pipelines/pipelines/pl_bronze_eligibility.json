@@ -1,0 +1,58 @@
+{
+    "name": "pl_bronze_eligibility",
+    "type": "Microsoft.DataFactory/factories/pipelines",
+    "properties": {
+        "description": "Bronze ingestion for Member Eligibility and Enrollment data. Migrated from SSIS package: ETL_Eligibility_Daily.dtsx. Handles SCD Type 2 member enrollment changes.",
+        "activities": [
+            {
+                "name": "Copy Member Eligibility",
+                "type": "Copy",
+                "dependsOn": [],
+                "policy": { "timeout": "0.02:00:00", "retry": 3, "retryIntervalInSeconds": 300 },
+                "typeProperties": {
+                    "source": {
+                        "type": "SqlServerSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT member_id, subscriber_id, group_id, plan_id, plan_name, metal_tier, product_type, effective_date, termination_date, birth_date, gender_code, relationship_code, zip_code, county_fips, state_code, is_active, enrollment_source, created_date, modified_date FROM eligibility.dbo.member_enrollment WHERE modified_date >= '@{pipeline().parameters.incremental_from}'",
+                            "type": "Expression"
+                        }
+                    },
+                    "sink": {
+                        "type": "ParquetSink",
+                        "storeSettings": { "type": "AzureBlobFSWriteSettings" }
+                    },
+                    "parallelCopies": 4,
+                    "dataIntegrationUnits": 8
+                },
+                "inputs":  [{ "referenceName": "ds_sqlserver_eligibility", "type": "DatasetReference" }],
+                "outputs": [{
+                    "referenceName": "ds_adls_bronze_parquet",
+                    "type": "DatasetReference",
+                    "parameters": {
+                        "container":   "bronze",
+                        "folder_path": "eligibility/member_enrollment/@{formatDateTime(utcNow(),'yyyy/MM/dd')}"
+                    }
+                }]
+            },
+            {
+                "name": "Run Eligibility Bronze Notebook",
+                "type": "DatabricksNotebook",
+                "dependsOn": [{ "activity": "Copy Member Eligibility", "dependencyConditions": ["Succeeded"] }],
+                "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" },
+                "typeProperties": {
+                    "notebookPath": "/HealthcarePlatform/pipelines/ingestion/02_eligibility_bronze",
+                    "baseParameters": {
+                        "environment":    { "value": "@pipeline().parameters.environment",                              "type": "Expression" },
+                        "run_date":       { "value": "@formatDateTime(pipeline().TriggerTime,'yyyy-MM-dd')",            "type": "Expression" },
+                        "records_copied": { "value": "@string(activity('Copy Member Eligibility').output.rowsCopied)", "type": "Expression" }
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "environment":      { "type": "string", "defaultValue": "dev" },
+            "incremental_from": { "type": "string", "defaultValue": "2020-01-01" }
+        },
+        "annotations": ["Bronze", "Eligibility", "Enrollment", "SCD2", "SSIS-Migration"]
+    }
+}

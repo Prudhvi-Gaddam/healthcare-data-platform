@@ -1,0 +1,33 @@
+{
+    "name": "tr_hl7_file_arrival",
+    "type": "Microsoft.DataFactory/factories/triggers",
+    "properties": {
+        "description": "Event-based trigger for HL7 ADT and Lab file ingestion. Fires when new HL7 files land in ADLS Gen2 landing zone. Near-real-time processing for ADT events (admits, discharges, transfers).",
+        "type": "BlobEventsTrigger",
+        "typeProperties": {
+            "blobPathBeginsWith": "/landing/hl7/",
+            "blobPathEndsWith":   ".hl7",
+            "ignoreEmptyBlobs":   true,
+            "scope": "/subscriptions/{subscription-id}/resourceGroups/rg-healthcare-prod/providers/Microsoft.Storage/storageAccounts/adlshealthcareprod",
+            "events": ["Microsoft.Storage.BlobCreated"]
+        },
+        "pipeline": {
+            "pipelineReference": {
+                "referenceName": "pl_bronze_labs_hl7",
+                "type": "PipelineReference"
+            },
+            "parameters": {
+                "environment": "prod",
+                "file_path": {
+                    "value": "@triggerBody().folderPath",
+                    "type": "Expression"
+                },
+                "file_name": {
+                    "value": "@triggerBody().fileName",
+                    "type": "Expression"
+                }
+            }
+        },
+        "annotations": ["Event-Based", "HL7", "ADT", "Near-Realtime", "Labs"]
+    }
+}

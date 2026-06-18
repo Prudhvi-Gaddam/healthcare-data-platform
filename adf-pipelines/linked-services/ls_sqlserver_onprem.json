@@ -1,0 +1,23 @@
+{
+    "name": "ls_sqlserver_onprem",
+    "type": "Microsoft.DataFactory/factories/linkedservices",
+    "properties": {
+        "description": "On-premises SQL Server connection via Self-Hosted Integration Runtime. Used for Claims, Eligibility, Provider, and Pharmacy source systems.",
+        "type": "SqlServer",
+        "typeProperties": {
+            "connectionString": {
+                "type": "AzureKeyVaultSecret",
+                "store": {
+                    "referenceName": "ls_keyvault",
+                    "type": "LinkedServiceReference"
+                },
+                "secretName": "sqlserver-claims-connectionstring"
+            }
+        },
+        "connectVia": {
+            "referenceName": "shir_onprem",
+            "type": "IntegrationRuntimeReference"
+        },
+        "annotations": ["OnPremises", "Claims", "SSIS-Migration"]
+    }
+}

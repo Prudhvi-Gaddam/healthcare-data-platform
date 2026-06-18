@@ -1,0 +1,29 @@
+{
+    "name": "ls_adls_gen2",
+    "type": "Microsoft.DataFactory/factories/linkedservices",
+    "properties": {
+        "description": "Azure Data Lake Storage Gen2 - Medallion Architecture (Bronze/Silver/Gold)",
+        "type": "AzureBlobFS",
+        "typeProperties": {
+            "url": {
+                "value": "@{linkedService().storageAccountUrl}",
+                "type": "Expression"
+            },
+            "accountKey": {
+                "type": "AzureKeyVaultSecret",
+                "store": {
+                    "referenceName": "ls_keyvault",
+                    "type": "LinkedServiceReference"
+                },
+                "secretName": "adls-account-key"
+            }
+        },
+        "parameters": {
+            "storageAccountUrl": {
+                "type": "string",
+                "defaultValue": "https://adlshealthcaredev.dfs.core.windows.net"
+            }
+        },
+        "annotations": ["ADLS", "Medallion", "Bronze", "Silver", "Gold"]
+    }
+}

@@ -1,0 +1,57 @@
+{
+    "name": "pl_bronze_provider",
+    "type": "Microsoft.DataFactory/factories/pipelines",
+    "properties": {
+        "description": "Bronze ingestion for Provider and Network data. Migrated from SSIS packages: ETL_Provider_Master.dtsx, ETL_Network_Contracts.dtsx. Handles provider roster changes and contract rate updates.",
+        "activities": [
+            {
+                "name": "Copy Provider Master",
+                "type": "Copy",
+                "dependsOn": [],
+                "policy": { "timeout": "0.01:00:00", "retry": 3 },
+                "typeProperties": {
+                    "source": {
+                        "type": "SqlServerSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT provider_npi, provider_name, provider_type_code, specialty_code, specialty_description, tax_id, address_line1, city, state_code, zip_code, phone, network_status, contract_effective_date, contract_termination_date, is_active, credentialing_status, created_date, modified_date FROM provider.dbo.provider_master WHERE modified_date >= '@{pipeline().parameters.incremental_from}'",
+                            "type": "Expression"
+                        }
+                    },
+                    "sink": {
+                        "type": "ParquetSink",
+                        "storeSettings": { "type": "AzureBlobFSWriteSettings" }
+                    },
+                    "parallelCopies": 4,
+                    "dataIntegrationUnits": 4
+                },
+                "inputs":  [{ "referenceName": "ds_sqlserver_provider", "type": "DatasetReference" }],
+                "outputs": [{
+                    "referenceName": "ds_adls_bronze_parquet",
+                    "type": "DatasetReference",
+                    "parameters": {
+                        "container":   "bronze",
+                        "folder_path": "provider/master/@{formatDateTime(utcNow(),'yyyy/MM/dd')}"
+                    }
+                }]
+            },
+            {
+                "name": "Run Provider Bronze Notebook",
+                "type": "DatabricksNotebook",
+                "dependsOn": [{ "activity": "Copy Provider Master", "dependencyConditions": ["Succeeded"] }],
+                "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" },
+                "typeProperties": {
+                    "notebookPath": "/HealthcarePlatform/pipelines/ingestion/03_provider_bronze",
+                    "baseParameters": {
+                        "environment": { "value": "@pipeline().parameters.environment",             "type": "Expression" },
+                        "run_date":    { "value": "@formatDateTime(pipeline().TriggerTime,'yyyy-MM-dd')", "type": "Expression" }
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "environment":      { "type": "string", "defaultValue": "dev" },
+            "incremental_from": { "type": "string", "defaultValue": "2020-01-01" }
+        },
+        "annotations": ["Bronze", "Provider", "Network", "SSIS-Migration"]
+    }
+}

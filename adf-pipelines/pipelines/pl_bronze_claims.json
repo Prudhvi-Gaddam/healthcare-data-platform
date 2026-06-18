@@ -1,0 +1,179 @@
+{
+    "name": "pl_bronze_claims",
+    "type": "Microsoft.DataFactory/factories/pipelines",
+    "properties": {
+        "description": "Bronze ingestion pipeline for Claims data. Migrated from SSIS packages: ETL_Claims_Daily_Load.dtsx, ETL_Claims_Adjustment.dtsx, ETL_Claims_Pharmacy.dtsx. Extracts from on-premises SQL Server via Self-Hosted IR, lands in ADLS Gen2 Bronze layer as Delta format.",
+        "activities": [
+            {
+                "name": "Get Watermark",
+                "description": "Retrieve last successful load watermark from audit table",
+                "type": "Lookup",
+                "dependsOn": [],
+                "policy": { "timeout": "0.00:05:00", "retry": 2 },
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT ISNULL(MAX(watermark_value), '@{pipeline().parameters.incremental_from}') AS last_watermark FROM audit.pipeline_watermarks WHERE pipeline_name = 'pl_bronze_claims' AND environment = '@{pipeline().parameters.environment}'",
+                            "type": "Expression"
+                        }
+                    },
+                    "dataset": { "referenceName": "ds_azure_sql_audit", "type": "DatasetReference" },
+                    "firstRowOnly": true
+                }
+            },
+            {
+                "name": "Validate Source Availability",
+                "description": "Check source system is available and has new data since watermark",
+                "type": "Lookup",
+                "dependsOn": [
+                    { "activity": "Get Watermark", "dependencyConditions": ["Succeeded"] }
+                ],
+                "typeProperties": {
+                    "source": {
+                        "type": "SqlServerSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT COUNT(*) AS new_records, MAX(modified_date) AS latest_record FROM claims.dbo.professional_claims WHERE modified_date > '@{activity('Get Watermark').output.firstRow.last_watermark}'",
+                            "type": "Expression"
+                        }
+                    },
+                    "dataset": { "referenceName": "ds_sqlserver_claims", "type": "DatasetReference" },
+                    "firstRowOnly": true
+                }
+            },
+            {
+                "name": "Has New Records",
+                "description": "Conditional branch - skip if no new data to avoid unnecessary processing",
+                "type": "IfCondition",
+                "dependsOn": [
+                    { "activity": "Validate Source Availability", "dependencyConditions": ["Succeeded"] }
+                ],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@greater(activity('Validate Source Availability').output.firstRow.new_records, 0)",
+                        "type": "Expression"
+                    },
+                    "ifTrueActivities": [
+                        {
+                            "name": "Copy Professional Claims",
+                            "description": "Extract professional claims from SQL Server, land in Bronze Delta",
+                            "type": "Copy",
+                            "dependsOn": [],
+                            "policy": { "timeout": "1.00:00:00", "retry": 3, "retryIntervalInSeconds": 300 },
+                            "typeProperties": {
+                                "source": {
+                                    "type": "SqlServerSource",
+                                    "sqlReaderQuery": {
+                                        "value": "SELECT claim_id, claim_line_id, claim_type_code, member_id, subscriber_id, group_id, plan_id, rendering_provider_npi, billing_provider_npi, facility_npi, service_date, from_date, to_date, received_date, paid_date, procedure_code, procedure_modifier_1, procedure_modifier_2, primary_diagnosis_code, diagnosis_code_2, diagnosis_code_3, revenue_code, drg_code, place_of_service_code, service_category, claim_status, billed_amount, allowed_amount, plan_paid_amount, member_deductible_amt, member_copay_amt, member_coinsurance_amt, member_other_liability_amt, units_of_service, admit_date, discharge_date, length_of_stay, created_date, modified_date FROM claims.dbo.professional_claims WHERE modified_date > '@{activity('Get Watermark').output.firstRow.last_watermark}'",
+                                        "type": "Expression"
+                                    },
+                                    "partitionOption": "DynamicRange",
+                                    "partitionSettings": {
+                                        "partitionColumnName": "service_date",
+                                        "partitionUpperBound": "@formatDateTime(utcNow(),'yyyy-MM-dd')",
+                                        "partitionLowerBound": "@pipeline().parameters.incremental_from"
+                                    }
+                                },
+                                "sink": {
+                                    "type": "ParquetSink",
+                                    "storeSettings": {
+                                        "type": "AzureBlobFSWriteSettings",
+                                        "copyBehavior": "PreserveHierarchy"
+                                    },
+                                    "formatSettings": {
+                                        "type": "ParquetWriteSettings"
+                                    }
+                                },
+                                "enableStaging": false,
+                                "parallelCopies": 8,
+                                "dataIntegrationUnits": 16,
+                                "translator": {
+                                    "type": "TabularTranslator",
+                                    "typeConversion": true,
+                                    "typeConversionSettings": {
+                                        "allowDataTruncation": false,
+                                        "treatBooleanAsNumber": false
+                                    }
+                                }
+                            },
+                            "inputs": [
+                                { "referenceName": "ds_sqlserver_claims", "type": "DatasetReference" }
+                            ],
+                            "outputs": [
+                                {
+                                    "referenceName": "ds_adls_bronze_parquet",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "container":   "bronze",
+                                        "folder_path": "claims/professional/@{formatDateTime(utcNow(),'yyyy/MM/dd')}"
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Run Bronze Delta Conversion",
+                            "description": "Databricks notebook converts Parquet landing to Delta format with PHI masking and DQ validation",
+                            "type": "DatabricksNotebook",
+                            "dependsOn": [
+                                { "activity": "Copy Professional Claims", "dependencyConditions": ["Succeeded"] }
+                            ],
+                            "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" },
+                            "typeProperties": {
+                                "notebookPath": "/HealthcarePlatform/pipelines/ingestion/01_claims_bronze",
+                                "baseParameters": {
+                                    "environment":      { "value": "@pipeline().parameters.environment",                                    "type": "Expression" },
+                                    "run_date":         { "value": "@formatDateTime(pipeline().TriggerTime,'yyyy-MM-dd')",                   "type": "Expression" },
+                                    "source_path":      { "value": "bronze/claims/professional/@{formatDateTime(utcNow(),'yyyy/MM/dd')}",    "type": "Expression" },
+                                    "records_copied":   { "value": "@string(activity('Copy Professional Claims').output.rowsCopied)",        "type": "Expression" },
+                                    "watermark_from":   { "value": "@activity('Get Watermark').output.firstRow.last_watermark",              "type": "Expression" }
+                                }
+                            }
+                        },
+                        {
+                            "name": "Update Watermark",
+                            "description": "Persist new watermark value after successful load",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                { "activity": "Run Bronze Delta Conversion", "dependencyConditions": ["Succeeded"] }
+                            ],
+                            "linkedServiceName": { "referenceName": "ls_azure_sql_audit", "type": "LinkedServiceReference" },
+                            "typeProperties": {
+                                "storedProcedureName": "[audit].[usp_UpdateWatermark]",
+                                "storedProcedureParameters": {
+                                    "PipelineName":    { "value": "pl_bronze_claims",                                                          "type": "String" },
+                                    "WatermarkValue":  { "value": "@activity('Validate Source Availability').output.firstRow.latest_record",   "type": "String" },
+                                    "Environment":     { "value": "@pipeline().parameters.environment",                                        "type": "String" },
+                                    "RecordsLoaded":   { "value": "@activity('Copy Professional Claims').output.rowsCopied",                   "type": "Int32" }
+                                }
+                            }
+                        }
+                    ],
+                    "ifFalseActivities": [
+                        {
+                            "name": "Log No New Data",
+                            "type": "SqlServerStoredProcedure",
+                            "linkedServiceName": { "referenceName": "ls_azure_sql_audit", "type": "LinkedServiceReference" },
+                            "typeProperties": {
+                                "storedProcedureName": "[audit].[usp_UpdateWatermark]",
+                                "storedProcedureParameters": {
+                                    "PipelineName":  { "value": "pl_bronze_claims", "type": "String" },
+                                    "Status":        { "value": "NO_NEW_DATA",      "type": "String" },
+                                    "RecordsLoaded": { "value": "0",                "type": "Int32" }
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        ],
+        "parameters": {
+            "environment":      { "type": "string", "defaultValue": "dev" },
+            "incremental_from": { "type": "string", "defaultValue": "2020-01-01" }
+        },
+        "variables": {
+            "watermark_value": { "type": "String", "defaultValue": "" },
+            "records_copied":  { "type": "Integer", "defaultValue": 0 }
+        },
+        "annotations": ["Bronze", "Claims", "Incremental", "SSIS-Migration", "Self-Hosted-IR"]
+    }
+}

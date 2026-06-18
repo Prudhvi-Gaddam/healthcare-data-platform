@@ -1,0 +1,12 @@
+{
+    "name": "ls_keyvault",
+    "type": "Microsoft.DataFactory/factories/linkedservices",
+    "properties": {
+        "description": "Azure Key Vault - central secrets management for all linked services",
+        "type": "AzureKeyVault",
+        "typeProperties": {
+            "baseUrl": "https://kv-healthcare-dev.vault.azure.net/"
+        },
+        "annotations": ["KeyVault", "Security", "HIPAA"]
+    }
+}

@@ -1,0 +1,35 @@
+{
+    "name": "tr_master_daily_tumbling",
+    "type": "Microsoft.DataFactory/factories/triggers",
+    "properties": {
+        "description": "Daily Tumbling Window trigger for master ingestion pipeline. Starts at 1:00 AM EST to ensure all Bronze loads complete before 6:00 AM SLA. Tumbling window ensures no overlap and supports backfill.",
+        "type": "TumblingWindowTrigger",
+        "typeProperties": {
+            "frequency": "Hour",
+            "interval":  24,
+            "startTime": "2024-01-01T06:00:00Z",
+            "endTime":   null,
+            "delay":     "00:05:00",
+            "maxConcurrency": 1,
+            "retryPolicy": {
+                "count": 3,
+                "intervalInSeconds": 600
+            },
+            "dependsOn": []
+        },
+        "pipeline": {
+            "pipelineReference": {
+                "referenceName": "pl_master_ingestion",
+                "type": "PipelineReference"
+            },
+            "parameters": {
+                "environment": "prod",
+                "incremental_from": {
+                    "value": "@formatDateTime(trigger().outputs.windowStartTime,'yyyy-MM-dd')",
+                    "type": "Expression"
+                }
+            }
+        },
+        "annotations": ["Daily", "Tumbling-Window", "SLA-6AM", "Master-Pipeline"]
+    }
+}

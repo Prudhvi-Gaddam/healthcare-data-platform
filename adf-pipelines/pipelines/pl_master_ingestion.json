@@ -1,0 +1,147 @@
+{
+    "name": "pl_master_ingestion",
+    "type": "Microsoft.DataFactory/factories/pipelines",
+    "properties": {
+        "description": "Master orchestration pipeline for Healthcare Data Platform. Runs all source ingestion pipelines in parallel, followed by Silver and Gold transformation notebooks in Databricks. Replaces 29 legacy SSIS packages.",
+        "activities": [
+            {
+                "name": "Ingest All Sources in Parallel",
+                "description": "Run all Bronze ingestion pipelines simultaneously for maximum throughput",
+                "type": "ExecutePipeline",
+                "dependsOn": [],
+                "typeProperties": {
+                    "pipeline": {
+                        "referenceName": "pl_bronze_claims",
+                        "type": "PipelineReference"
+                    },
+                    "parameters": {
+                        "environment":      { "value": "@pipeline().parameters.environment",      "type": "Expression" },
+                        "incremental_from": { "value": "@pipeline().parameters.incremental_from", "type": "Expression" }
+                    },
+                    "waitOnCompletion": false
+                }
+            },
+            {
+                "name": "Ingest Eligibility",
+                "type": "ExecutePipeline",
+                "dependsOn": [],
+                "typeProperties": {
+                    "pipeline": { "referenceName": "pl_bronze_eligibility", "type": "PipelineReference" },
+                    "parameters": {
+                        "environment":      { "value": "@pipeline().parameters.environment",      "type": "Expression" },
+                        "incremental_from": { "value": "@pipeline().parameters.incremental_from", "type": "Expression" }
+                    },
+                    "waitOnCompletion": false
+                }
+            },
+            {
+                "name": "Ingest Provider",
+                "type": "ExecutePipeline",
+                "dependsOn": [],
+                "typeProperties": {
+                    "pipeline": { "referenceName": "pl_bronze_provider", "type": "PipelineReference" },
+                    "parameters": {
+                        "environment":      { "value": "@pipeline().parameters.environment",      "type": "Expression" },
+                        "incremental_from": { "value": "@pipeline().parameters.incremental_from", "type": "Expression" }
+                    },
+                    "waitOnCompletion": false
+                }
+            },
+            {
+                "name": "Ingest Pharmacy",
+                "type": "ExecutePipeline",
+                "dependsOn": [],
+                "typeProperties": {
+                    "pipeline": { "referenceName": "pl_bronze_pharmacy", "type": "PipelineReference" },
+                    "parameters": {
+                        "environment":      { "value": "@pipeline().parameters.environment",      "type": "Expression" },
+                        "incremental_from": { "value": "@pipeline().parameters.incremental_from", "type": "Expression" }
+                    },
+                    "waitOnCompletion": false
+                }
+            },
+            {
+                "name": "Wait for All Bronze Loads",
+                "description": "Gate activity - waits for all Bronze pipelines to complete before Silver transformation",
+                "type": "Wait",
+                "dependsOn": [
+                    { "activity": "Ingest All Sources in Parallel", "dependencyConditions": ["Succeeded"] },
+                    { "activity": "Ingest Eligibility",             "dependencyConditions": ["Succeeded"] },
+                    { "activity": "Ingest Provider",                "dependencyConditions": ["Succeeded"] },
+                    { "activity": "Ingest Pharmacy",                "dependencyConditions": ["Succeeded"] }
+                ],
+                "typeProperties": { "waitTimeInSeconds": 1 }
+            },
+            {
+                "name": "Run Silver Transformation",
+                "description": "Databricks notebook - validates, cleanses, and standardizes Bronze data into Silver layer",
+                "type": "DatabricksNotebook",
+                "dependsOn": [
+                    { "activity": "Wait for All Bronze Loads", "dependencyConditions": ["Succeeded"] }
+                ],
+                "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" },
+                "typeProperties": {
+                    "notebookPath": "/HealthcarePlatform/pipelines/transformation/10_claims_silver",
+                    "baseParameters": {
+                        "environment":      { "value": "@pipeline().parameters.environment",      "type": "Expression" },
+                        "run_date":         { "value": "@formatDateTime(pipeline().TriggerTime,'yyyy-MM-dd')", "type": "Expression" }
+                    }
+                }
+            },
+            {
+                "name": "Run Gold Aggregation",
+                "description": "Databricks notebook - builds business-ready Gold layer aggregates and fact tables",
+                "type": "DatabricksNotebook",
+                "dependsOn": [
+                    { "activity": "Run Silver Transformation", "dependencyConditions": ["Succeeded"] }
+                ],
+                "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" },
+                "typeProperties": {
+                    "notebookPath": "/HealthcarePlatform/pipelines/transformation/11_claims_gold",
+                    "baseParameters": {
+                        "environment": { "value": "@pipeline().parameters.environment", "type": "Expression" },
+                        "run_date":    { "value": "@formatDateTime(pipeline().TriggerTime,'yyyy-MM-dd')", "type": "Expression" }
+                    }
+                }
+            },
+            {
+                "name": "Run AI ML Scoring",
+                "description": "Databricks notebook - runs readmission risk scoring and anomaly detection on fresh Gold data",
+                "type": "DatabricksNotebook",
+                "dependsOn": [
+                    { "activity": "Run Gold Aggregation", "dependencyConditions": ["Succeeded"] }
+                ],
+                "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" },
+                "typeProperties": {
+                    "notebookPath": "/HealthcarePlatform/ai-ml/readmission_risk_model",
+                    "baseParameters": {
+                        "environment": { "value": "@pipeline().parameters.environment", "type": "Expression" },
+                        "run_date":    { "value": "@formatDateTime(pipeline().TriggerTime,'yyyy-MM-dd')", "type": "Expression" }
+                    }
+                }
+            },
+            {
+                "name": "Update Pipeline Audit",
+                "description": "Record master pipeline completion in audit table",
+                "type": "DatabricksNotebook",
+                "dependsOn": [
+                    { "activity": "Run AI ML Scoring", "dependencyConditions": ["Succeeded", "Failed"] }
+                ],
+                "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" },
+                "typeProperties": {
+                    "notebookPath": "/HealthcarePlatform/pipelines/dashboards/pipeline_observability",
+                    "baseParameters": {
+                        "environment": { "value": "@pipeline().parameters.environment", "type": "Expression" },
+                        "run_date":    { "value": "@formatDateTime(pipeline().TriggerTime,'yyyy-MM-dd')", "type": "Expression" },
+                        "status":      { "value": "@activity('Run AI ML Scoring').Status",                "type": "Expression" }
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "environment":      { "type": "string", "defaultValue": "dev" },
+            "incremental_from": { "type": "string", "defaultValue": "@formatDateTime(addDays(utcNow(),-1),'yyyy-MM-dd')" }
+        },
+        "annotations": ["Master", "Orchestration", "Healthcare", "SSIS-Migration"]
+    }
+}
