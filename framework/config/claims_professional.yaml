@@ -1,0 +1,76 @@
+# framework/config/sources/claims_professional.yaml
+# Configuration for Professional Claims source system
+# Onboard by creating this file — zero pipeline code changes required
+
+source_id: claims_professional
+source_type: sql_server
+connection_secret: kv-claims-sqlserver-conn
+target_layer: bronze
+primary_keys:
+  - claim_id
+  - claim_line_id
+watermark_column: modified_date
+partition_column: service_date
+schema_version: v3
+sla_hour: 5
+alert_channel: teams-tcim-alerts
+
+extract_query: >
+  SELECT
+    claim_id, claim_line_id, claim_type_code,
+    member_id, subscriber_id, group_id, plan_id,
+    rendering_provider_npi, billing_provider_npi, facility_npi,
+    service_date, from_date, to_date, received_date, paid_date,
+    procedure_code, procedure_modifier_1, procedure_modifier_2,
+    primary_diagnosis_code, diagnosis_code_2, diagnosis_code_3,
+    revenue_code, drg_code, place_of_service_code,
+    service_category, claim_status,
+    billed_amount, allowed_amount, plan_paid_amount,
+    member_deductible_amt, member_copay_amt,
+    member_coinsurance_amt, member_other_liability_amt,
+    coordination_of_benefits_amt, units_of_service,
+    admit_date, discharge_date, admit_type_code,
+    discharge_disposition_code, length_of_stay,
+    created_date, modified_date
+  FROM claims.dbo.professional_claims
+  WHERE modified_date >= '{watermark}'
+    AND claim_type_code IN ('P', 'I', 'D')
+
+phi_columns:
+  - member_id
+  - subscriber_id
+  - rendering_provider_npi
+  - billing_provider_npi
+
+dq_rules:
+  - rule: not_null
+    columns: [claim_id, member_id, service_date, claim_status]
+    severity: ERROR
+
+  - rule: not_null
+    columns: [allowed_amount, plan_paid_amount]
+    severity: ERROR
+
+  - rule: valid_values
+    column: claim_status
+    values: [PAID, DENIED, PENDING, ADJUSTED, VOID, SUSPENDED]
+    severity: ERROR
+
+  - rule: valid_values
+    column: claim_type_code
+    values: [P, I, D]
+    severity: ERROR
+
+  - rule: date_range
+    column: service_date
+    min: "2015-01-01"
+    max: "2030-12-31"
+    severity: ERROR
+
+  - rule: row_count
+    min: 1000
+    severity: WARN
+
+  - rule: not_null
+    columns: [procedure_code]
+    severity: WARN

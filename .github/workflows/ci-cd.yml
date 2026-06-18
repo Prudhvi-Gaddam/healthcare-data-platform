@@ -1,0 +1,382 @@
+name: Healthcare Data Platform CI/CD
+
+on:
+  push:
+    branches: [main, develop, "release/*"]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  PYTHON_VERSION: "3.11"
+  DATABRICKS_HOST_DEV:  ${{ secrets.DATABRICKS_HOST_DEV }}
+  DATABRICKS_HOST_PROD: ${{ secrets.DATABRICKS_HOST_PROD }}
+
+jobs:
+  # ===========================================================================
+  # JOB 1: Code Quality, Linting, Formatting
+  # ===========================================================================
+  lint:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install lint dependencies
+        run: |
+          pip install black flake8 isort mypy bandit sqlfluff
+          pip install -r requirements.txt
+
+      - name: Black (formatting check)
+        run: black --check framework/ ai-ml/ databricks/ tests/
+
+      - name: isort (import ordering)
+        run: isort --check-only framework/ ai-ml/ databricks/ tests/
+
+      - name: Flake8 (style)
+        run: flake8 framework/ ai-ml/ databricks/ tests/ --max-line-length=120 --ignore=E501,W503
+
+      - name: Bandit (security scan — HIPAA)
+        run: |
+          # Ensure no hardcoded credentials or PHI in code
+          bandit -r framework/ ai-ml/ databricks/ -ll --exclude tests/
+          echo "✅ Security scan passed"
+
+      - name: SQLFluff (SQL linting)
+        run: sqlfluff lint dashboards/databricks-sql/ sql/ --dialect sparksql
+
+      - name: YAML validation
+        run: |
+          pip install pyyaml
+          python3 -c "
+          import yaml, glob, sys
+          errors = []
+          for f in glob.glob('framework/config/**/*.yaml', recursive=True):
+              try:
+                  yaml.safe_load(open(f))
+                  print(f'✅ {f}')
+              except Exception as e:
+                  errors.append(f'❌ {f}: {e}')
+          if errors:
+              [print(e) for e in errors]
+              sys.exit(1)
+          "
+
+  # ===========================================================================
+  # JOB 2: Unit Tests with Coverage
+  # ===========================================================================
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          pip install pyspark==3.5.0 delta-spark==3.1.0
+          pip install pytest pytest-cov pytest-xdist
+          pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: |
+          pytest tests/unit/ \
+            -v \
+            --cov=framework \
+            --cov=ai-ml \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=80 \
+            -n auto \
+            --tb=short
+        env:
+          PYSPARK_PYTHON: python3
+          ENVIRONMENT: test
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.xml
+          flags: unit-tests
+          fail_ci_if_error: true
+
+  # ===========================================================================
+  # JOB 3: Data Quality Test Suite
+  # ===========================================================================
+  data-quality-tests:
+    name: Data Quality Validation
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install great-expectations pyspark==3.5.0
+          pip install -r requirements.txt
+
+      - name: Run Great Expectations suite
+        run: |
+          cd tests/data-quality
+          python3 -c "
+          import great_expectations as ge
+          context = ge.get_context()
+          results = context.run_checkpoint(checkpoint_name='healthcare_platform_checkpoint')
+          if not results.success:
+              print('❌ Data quality validation FAILED')
+              exit(1)
+          print('✅ Data quality validation passed')
+          "
+
+  # ===========================================================================
+  # JOB 4: Terraform Plan (PR only)
+  # ===========================================================================
+  terraform-plan:
+    name: Terraform Plan (Dev)
+    runs-on: ubuntu-latest
+    needs: [unit-tests]
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.0"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive infrastructure/terraform/
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: infrastructure/terraform
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: infrastructure/terraform
+
+      - name: Terraform Plan
+        id: tf-plan
+        run: terraform plan -var-file="environments/dev.tfvars" -no-color -out=tfplan 2>&1 | tee plan_output.txt
+        working-directory: infrastructure/terraform
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+
+      - name: Post Plan to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync('infrastructure/terraform/plan_output.txt', 'utf8');
+            const summary = planOutput.includes('No changes') ? '✅ No infrastructure changes' : '⚠️ Infrastructure changes planned';
+            const body = `## Terraform Plan Results\n${summary}\n\n<details><summary>Full Plan</summary>\n\n\`\`\`\n${planOutput.slice(0, 3000)}\n\`\`\`\n</details>`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+  # ===========================================================================
+  # JOB 5: HIPAA Compliance Check
+  # ===========================================================================
+  hipaa-compliance:
+    name: HIPAA Compliance Scan
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for PHI patterns in code
+        run: |
+          python3 -c "
+          import re, os, sys, glob
+          # Patterns that suggest hardcoded PHI
+          PHI_PATTERNS = [
+              r'\b\d{3}-\d{2}-\d{4}\b',           # SSN format
+              r'(?i)ssn\s*=\s*[\"\']\d',           # SSN assignment
+              r'(?i)member_name\s*=\s*[\"\']\w',   # Hardcoded name
+              r'(?i)date_of_birth\s*=\s*[\"\']\d', # DOB assignment
+          ]
+          violations = []
+          exclude_dirs = {'.git', '__pycache__', 'node_modules', 'data-samples'}
+          for root, dirs, files in os.walk('.'):
+              dirs[:] = [d for d in dirs if d not in exclude_dirs]
+              for fname in files:
+                  if not fname.endswith(('.py', '.sql', '.json', '.yaml')): continue
+                  fpath = os.path.join(root, fname)
+                  try:
+                      content = open(fpath).read()
+                      for pattern in PHI_PATTERNS:
+                          if re.search(pattern, content):
+                              violations.append(f'PHI pattern found: {fpath}')
+                  except:
+                      pass
+          if violations:
+              print('❌ Potential PHI in code:')
+              [print(v) for v in violations]
+              sys.exit(1)
+          print('✅ No PHI patterns detected in codebase')
+          "
+
+      - name: Check PHI masking coverage
+        run: |
+          python3 -c "
+          # Verify all source configs declare phi_columns
+          import yaml, glob, sys
+          warnings = []
+          for f in glob.glob('framework/config/sources/*.yaml'):
+              config = yaml.safe_load(open(f))
+              if not config.get('phi_columns'):
+                  warnings.append(f'WARNING: {f} has no phi_columns declared')
+          if warnings:
+              [print(w) for w in warnings]
+              # Warn but don't fail — some sources may genuinely have no PHI
+          print('✅ PHI column coverage check complete')
+          "
+
+  # ===========================================================================
+  # JOB 6: Deploy to Dev
+  # ===========================================================================
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    needs: [unit-tests, data-quality-tests, hipaa-compliance]
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    environment: development
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Databricks CLI
+        run: pip install databricks-cli
+
+      - name: Configure Databricks CLI (Dev)
+        run: |
+          databricks configure --token <<EOF
+          ${{ env.DATABRICKS_HOST_DEV }}
+          ${{ secrets.DATABRICKS_TOKEN_DEV }}
+          EOF
+
+      - name: Deploy Framework to Dev
+        run: |
+          echo "Deploying reusable framework..."
+          databricks workspace import_dir framework/ /HealthcarePlatform/framework --overwrite
+          echo "✅ Framework deployed"
+
+      - name: Deploy Notebooks to Dev
+        run: |
+          echo "Deploying pipeline notebooks..."
+          databricks workspace import_dir databricks/notebooks/ /HealthcarePlatform/pipelines --overwrite
+          echo "Deploying AI/ML notebooks..."
+          databricks workspace import_dir ai-ml/ /HealthcarePlatform/ai-ml --overwrite
+          echo "✅ Notebooks deployed"
+
+      - name: Update Databricks Jobs
+        run: |
+          echo "Updating workflow definitions..."
+          for job_file in databricks/jobs/*.json; do
+            job_name=$(python3 -c "import json; print(json.load(open('$job_file'))['name'])")
+            # Check if job exists, update or create
+            job_id=$(databricks jobs list --output JSON | python3 -c "
+          import json, sys
+          jobs = json.load(sys.stdin).get('jobs', [])
+          match = [j['job_id'] for j in jobs if j['settings']['name'] == '$job_name']
+          print(match[0] if match else '')
+          ")
+            if [ -n "$job_id" ]; then
+              databricks jobs reset --job-id $job_id --json @$job_file
+              echo "✅ Updated job: $job_name"
+            else
+              databricks jobs create --json @$job_file
+              echo "✅ Created job: $job_name"
+            fi
+          done
+
+      - name: Notify Teams
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          curl -s -X POST "${{ secrets.TEAMS_WEBHOOK_DEV }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\": \"Healthcare Platform Deploy: $STATUS | Env: DEV | Branch: ${{ github.ref_name }} | Actor: ${{ github.actor }}\"}"
+
+  # ===========================================================================
+  # JOB 7: Deploy to Production (manual approval required)
+  # ===========================================================================
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [unit-tests, data-quality-tests, hipaa-compliance]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Databricks CLI
+        run: pip install databricks-cli
+
+      - name: Configure Databricks CLI (Prod)
+        run: |
+          databricks configure --token <<EOF
+          ${{ env.DATABRICKS_HOST_PROD }}
+          ${{ secrets.DATABRICKS_TOKEN_PROD }}
+          EOF
+
+      - name: Deploy to Production
+        run: |
+          echo "🚀 Deploying to PRODUCTION..."
+          databricks workspace import_dir framework/ /HealthcarePlatform/framework --overwrite
+          databricks workspace import_dir databricks/notebooks/ /HealthcarePlatform/pipelines --overwrite
+          databricks workspace import_dir ai-ml/ /HealthcarePlatform/ai-ml --overwrite
+          echo "✅ Production deployment complete"
+
+      - name: Run Post-Deployment Smoke Tests
+        run: |
+          python3 tests/integration/smoke_test.py \
+            --env prod \
+            --host ${{ env.DATABRICKS_HOST_PROD }} \
+            --token ${{ secrets.DATABRICKS_TOKEN_PROD }}
+
+      - name: Notify Teams on Production Deploy
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          EMOJI=$([ "$STATUS" = "success" ] && echo "🚀" || echo "🚨")
+          curl -s -X POST "${{ secrets.TEAMS_WEBHOOK_PROD }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\": \"$EMOJI Healthcare Platform PRODUCTION Deploy: $STATUS | Actor: ${{ github.actor }} | Commit: ${{ github.sha }}\"}"
