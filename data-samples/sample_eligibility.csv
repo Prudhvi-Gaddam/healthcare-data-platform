@@ -1,0 +1,6 @@
+member_id,subscriber_id,plan_id,plan_name,metal_tier,product_type,effective_date,termination_date,gender_code,zip_code,state_code,is_active,plan_year
+a665a45920422f9d417e4867efdc4fb8f04851f3d0,s1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0,PLAN-GOLD-001,Gold Choice PPO,GOLD,PPO,2026-01-01,2026-12-31,M,19103,PA,true,2026
+b3a8e0e1f9ab1bfe6a3fc3d9a6b5e4c2d1f0e7a9,s2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1,PLAN-SILVER-002,Silver Select HMO,SILVER,HMO,2026-01-01,,F,19104,PA,true,2026
+c7d2f5a1e8b9c4d3e2f1a0b9c8d7e6f5a4b3c2d1,s3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2,PLAN-GOLD-001,Gold Choice PPO,GOLD,PPO,2026-01-01,2026-12-31,M,19106,PA,true,2026
+d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0,s4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3,PLAN-BRONZE-003,Bronze Basic PPO,BRONZE,PPO,2026-01-01,,F,19107,PA,true,2026
+e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0,s5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4,PLAN-PLATINUM-004,Platinum Elite HMO,PLATINUM,HMO,2026-01-01,2026-12-31,M,19108,PA,true,2026

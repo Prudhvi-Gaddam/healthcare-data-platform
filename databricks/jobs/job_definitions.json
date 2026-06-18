@@ -1,0 +1,246 @@
+{
+  "jobs": [
+    {
+      "name": "healthcare-daily-ingestion",
+      "description": "Daily master ingestion job - runs all Bronze → Silver → Gold → AI/ML pipeline",
+      "schedule": {
+        "quartz_cron_expression": "0 0 1 * * ?",
+        "timezone_id": "America/New_York",
+        "pause_status": "UNPAUSED"
+      },
+      "max_concurrent_runs": 1,
+      "tasks": [
+        {
+          "task_key": "ingest_claims",
+          "description": "Claims Bronze ingestion",
+          "notebook_task": {
+            "notebook_path": "/HealthcarePlatform/pipelines/ingestion/01_claims_bronze",
+            "base_parameters": {
+              "environment": "prod",
+              "run_date": "{{job.start_time.iso_date}}"
+            }
+          },
+          "existing_cluster_id": "{{healthcare-ingestion-cluster-id}}",
+          "timeout_seconds": 7200,
+          "max_retries": 2,
+          "retry_on_timeout": true
+        },
+        {
+          "task_key": "ingest_eligibility",
+          "description": "Eligibility Bronze ingestion",
+          "notebook_task": {
+            "notebook_path": "/HealthcarePlatform/pipelines/ingestion/02_eligibility_bronze",
+            "base_parameters": {
+              "environment": "prod",
+              "run_date": "{{job.start_time.iso_date}}"
+            }
+          },
+          "existing_cluster_id": "{{healthcare-ingestion-cluster-id}}",
+          "timeout_seconds": 3600,
+          "max_retries": 2
+        },
+        {
+          "task_key": "ingest_provider",
+          "description": "Provider Bronze ingestion",
+          "notebook_task": {
+            "notebook_path": "/HealthcarePlatform/pipelines/ingestion/03_provider_bronze",
+            "base_parameters": {
+              "environment": "prod",
+              "run_date": "{{job.start_time.iso_date}}"
+            }
+          },
+          "existing_cluster_id": "{{healthcare-ingestion-cluster-id}}",
+          "timeout_seconds": 3600,
+          "max_retries": 2
+        },
+        {
+          "task_key": "ingest_pharmacy",
+          "description": "Pharmacy Bronze ingestion",
+          "notebook_task": {
+            "notebook_path": "/HealthcarePlatform/pipelines/ingestion/04_pharmacy_bronze",
+            "base_parameters": {
+              "environment": "prod",
+              "run_date": "{{job.start_time.iso_date}}"
+            }
+          },
+          "existing_cluster_id": "{{healthcare-ingestion-cluster-id}}",
+          "timeout_seconds": 3600,
+          "max_retries": 2
+        },
+        {
+          "task_key": "silver_transformation",
+          "description": "Silver layer transformation - validation and standardization",
+          "depends_on": [
+            { "task_key": "ingest_claims" },
+            { "task_key": "ingest_eligibility" },
+            { "task_key": "ingest_provider" },
+            { "task_key": "ingest_pharmacy" }
+          ],
+          "notebook_task": {
+            "notebook_path": "/HealthcarePlatform/pipelines/transformation/10_claims_silver",
+            "base_parameters": {
+              "environment": "prod",
+              "run_date": "{{job.start_time.iso_date}}"
+            }
+          },
+          "existing_cluster_id": "{{healthcare-ingestion-cluster-id}}",
+          "timeout_seconds": 7200,
+          "max_retries": 1
+        },
+        {
+          "task_key": "gold_aggregation",
+          "description": "Gold layer aggregation - business-ready serving tables",
+          "depends_on": [{ "task_key": "silver_transformation" }],
+          "notebook_task": {
+            "notebook_path": "/HealthcarePlatform/pipelines/transformation/11_claims_gold",
+            "base_parameters": {
+              "environment": "prod",
+              "run_date": "{{job.start_time.iso_date}}"
+            }
+          },
+          "existing_cluster_id": "{{healthcare-ingestion-cluster-id}}",
+          "timeout_seconds": 7200,
+          "max_retries": 1
+        },
+        {
+          "task_key": "hedis_measures",
+          "description": "HEDIS quality measure calculations",
+          "depends_on": [{ "task_key": "gold_aggregation" }],
+          "notebook_task": {
+            "notebook_path": "/HealthcarePlatform/pipelines/transformation/13_hedis_measures",
+            "base_parameters": {
+              "environment": "prod",
+              "measurement_year": "{{job.start_time.iso_year}}"
+            }
+          },
+          "existing_cluster_id": "{{healthcare-ingestion-cluster-id}}",
+          "timeout_seconds": 7200,
+          "max_retries": 1
+        },
+        {
+          "task_key": "aiml_scoring",
+          "description": "AI/ML pipeline - readmission risk, anomaly detection, NLP",
+          "depends_on": [{ "task_key": "gold_aggregation" }],
+          "notebook_task": {
+            "notebook_path": "/HealthcarePlatform/ai-ml/run_aiml_pipeline",
+            "base_parameters": {
+              "environment": "prod",
+              "run_date": "{{job.start_time.iso_date}}"
+            }
+          },
+          "existing_cluster_id": "{{healthcare-ml-cluster-id}}",
+          "timeout_seconds": 10800,
+          "max_retries": 1
+        },
+        {
+          "task_key": "pipeline_observability",
+          "description": "Update pipeline health dashboard",
+          "depends_on": [
+            { "task_key": "hedis_measures" },
+            { "task_key": "aiml_scoring" }
+          ],
+          "notebook_task": {
+            "notebook_path": "/HealthcarePlatform/pipelines/dashboards/pipeline_observability",
+            "base_parameters": {
+              "environment": "prod",
+              "run_date": "{{job.start_time.iso_date}}"
+            }
+          },
+          "existing_cluster_id": "{{healthcare-ingestion-cluster-id}}",
+          "timeout_seconds": 1800,
+          "max_retries": 1
+        }
+      ],
+      "email_notifications": {
+        "on_failure": ["data-engineering-alerts@company.com"],
+        "on_success": [],
+        "no_alert_for_skipped_runs": true
+      },
+      "tags": {
+        "team": "data-engineering",
+        "project": "healthcare-data-platform",
+        "hipaa": "true"
+      }
+    },
+    {
+      "name": "healthcare-monthly-hedis",
+      "description": "Monthly HEDIS quality measure calculation job",
+      "schedule": {
+        "quartz_cron_expression": "0 0 2 1 * ?",
+        "timezone_id": "America/New_York",
+        "pause_status": "UNPAUSED"
+      },
+      "max_concurrent_runs": 1,
+      "tasks": [
+        {
+          "task_key": "hedis_full_year",
+          "notebook_task": {
+            "notebook_path": "/HealthcarePlatform/pipelines/transformation/13_hedis_measures",
+            "base_parameters": {
+              "environment": "prod",
+              "measurement_year": "{{job.start_time.iso_year}}"
+            }
+          },
+          "existing_cluster_id": "{{healthcare-ingestion-cluster-id}}",
+          "timeout_seconds": 14400,
+          "max_retries": 1
+        }
+      ]
+    },
+    {
+      "name": "healthcare-ml-model-retraining",
+      "description": "Weekly ML model retraining - readmission risk and anomaly detection",
+      "schedule": {
+        "quartz_cron_expression": "0 0 3 ? * SUN",
+        "timezone_id": "America/New_York",
+        "pause_status": "UNPAUSED"
+      },
+      "max_concurrent_runs": 1,
+      "tasks": [
+        {
+          "task_key": "retrain_readmission_model",
+          "description": "Retrain XGBoost readmission risk model on latest data",
+          "notebook_task": {
+            "notebook_path": "/HealthcarePlatform/ai-ml/readmission_risk_model",
+            "base_parameters": {
+              "environment": "prod",
+              "mode": "train"
+            }
+          },
+          "existing_cluster_id": "{{healthcare-ml-cluster-id}}",
+          "timeout_seconds": 14400,
+          "max_retries": 1
+        },
+        {
+          "task_key": "retrain_anomaly_model",
+          "description": "Retrain Isolation Forest anomaly detection model",
+          "notebook_task": {
+            "notebook_path": "/HealthcarePlatform/ai-ml/claims_anomaly_detector",
+            "base_parameters": {
+              "environment": "prod",
+              "mode": "train"
+            }
+          },
+          "existing_cluster_id": "{{healthcare-ml-cluster-id}}",
+          "timeout_seconds": 7200,
+          "max_retries": 1
+        },
+        {
+          "task_key": "refresh_rag_vector_store",
+          "description": "Rebuild RAG clinical knowledge vector store",
+          "depends_on": [],
+          "notebook_task": {
+            "notebook_path": "/HealthcarePlatform/ai-ml/rag_clinical_chatbot",
+            "base_parameters": {
+              "environment": "prod",
+              "mode": "rebuild_index"
+            }
+          },
+          "existing_cluster_id": "{{healthcare-ml-cluster-id}}",
+          "timeout_seconds": 7200,
+          "max_retries": 1
+        }
+      ]
+    }
+  ]
+}
